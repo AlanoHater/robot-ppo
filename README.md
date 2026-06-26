@@ -306,12 +306,40 @@ Intervención (commit de v4):
   política pruebe la transición arriesgada de sentado a cuclillas sin volver a
   desestabilizarse como en v2.
 
-*(Resultados pendientes de la corrida de warm-start de 3M steps. Lo que se
-busca: que `feet_tuck` se active, que `standup`/`upright` superen a v3, y que
-la pose cambie de "sentado en L" a cuclillas o medio-parado. Expectativa
-honesta: probable recoger piernas y subir algo más; pararse del todo y
-mantenerse de pie sigue siendo el techo difícil de este presupuesto de
-muestras.)*
+Resultado de la corrida (warm-start 3M steps, 10 envs) — **la intervención no
+funcionó**:
+
+| medida | v3 (sentado en L) | v4 (feet_tuck) |
+|---|---|---|
+| `z` promedio | 0.291 | **0.209** (bajó) |
+| `z` máximo | 0.450 | 0.429 |
+| dist. pie→torso | 0.80 | 0.68 (mejoró poco) |
+| `feet_tuck` promedio | — | **0.004** (~0) |
+| % steps con pies recogidos | — | 9 % |
+| % steps parado (z>0.80) | 0 % | **0 %** |
+
+El warm-start con `feet_tuck` **no sacó al robot de la pose en L**; la altura
+promedio incluso bajó un poco. Los picos de `feet_tuck` en las curvas son
+transitorios — en promedio es ~0, el robot recoge los pies solo 9 % del tiempo
+y no de forma sostenida.
+
+Por qué falló: la pose en L es un **atractor demasiado fuerte**. Recoger los
+pies exige una transición que temporalmente baja la altura y desestabiliza, y
+un bonus pequeño (`feet_tuck`) con exploración baja (`ent_coef=0.002`) no
+compensa abandonar un óptimo local estable. Detalle revelador: el reward total
+*subió* (~900 vs ~850) por los `feet_tuck` ocasionales, **pero el objetivo
+real (altura) empeoró** — un ejemplo claro de optimizar el proxy de
+recompensa sin mejorar la meta. El modelo v3 (sentado erguido) se conserva
+como el mejor resultado; v4 se preserva como `*_v4_feettuck.*` para
+documentar el experimento negativo.
+
+Lecciones para el reporte (ambas valiosas aunque el experimento "fallara"):
+1. Sacar a una política de un óptimo local estable requiere más que un bonus
+   suave: o una penalización activa de la pose no deseada, o exploración
+   mucho mayor, o un curriculum que inicialice desde poses variadas — no basta
+   con añadir una recompensa positiva tímida.
+2. El reward total no es un buen indicador de éxito por sí solo; hay que medir
+   la cantidad física objetivo (aquí `z` y la geometría de la pose).
 
 ## Limitaciones conocidas
 
