@@ -22,6 +22,8 @@ la anterior supera un *passing score*. Esto evita la recompensa dispersa.
 A_ij,t = max(A_ij,t-1,  R_i,t − PS_ij)        R_t = Σ_i Σ_j  A_ij,t · R_j,t
 ```
 
+![Estructura del DAG](dag_diagram.png)
+
 **Adaptación a hardware de consumo:** MuJoCo CPU (no Isaac Gym), 17 DoF (no iCub
 32 DoF), ~3–6M steps (no decenas de millones), + señales CPG, *action clamping*
 y representación ego-céntrica.
