@@ -49,7 +49,7 @@ class AchievementRewardWrapper(Wrapper):
     """
 
     SKILL_NAMES = ['lift', 'standup', 'upright']
-    DEFAULT_PS  = {(0, 1): 1.0, (1, 2): 4.0}
+    DEFAULT_PS  = {(0, 1): 0.3, (1, 2): 4.0}
 
     def __init__(self, env, passing_scores=None, use_cpg=True,
                  use_action_clamp=True, episode_max_steps=1000):
@@ -85,12 +85,10 @@ class AchievementRewardWrapper(Wrapper):
     def _compute_stage_rewards(self):
         data = self.env.unwrapped.data
         z    = float(data.qpos[2])
-        qw, qx, qy, qz = data.qpos[3:7]
-        body_up_z = float(1.0 - 2.0 * (qx**2 + qy**2))
 
         r_lift    = np.clip(z - 0.30, 0.0, None) * 3.0
         r_standup = np.clip(z - 0.80, 0.0, None) * 8.0
-        r_upright = np.clip(body_up_z, 0.0, None) * 3.0 + np.clip(z - 1.00, 0.0, None) * 5.0
+        r_upright = np.clip(z - 1.00, 0.0, None) * 8.0
 
         return [r_lift, r_standup, r_upright]
 
