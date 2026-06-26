@@ -26,7 +26,7 @@ import gymnasium as gym
 from gymnasium import Wrapper
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 
 
@@ -239,13 +239,17 @@ def make_env():
     env  = AchievementRewardWrapper(base, use_cpg=True, use_action_clamp=True)
     return Monitor(env)
 
-def train(total_timesteps=500_000, save_path='dag_humanoid_model'):
+def train(total_timesteps=500_000, save_path='dag_humanoid_model', n_envs=1):
     print("=" * 60)
     print("DAG Reward Humanoid  —  Meng & Xiao (2023) adaptation")
     print(f"Total timesteps: {total_timesteps:,}")
+    print(f"Entornos paralelos: {n_envs}")
     print("=" * 60)
 
-    env = DummyVecEnv([make_env])
+    if n_envs > 1:
+        env = SubprocVecEnv([make_env for _ in range(n_envs)])
+    else:
+        env = DummyVecEnv([make_env])
 
     model = PPO(
         policy        = 'MlpPolicy',
@@ -331,10 +335,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', choices=['train', 'demo', 'ablation'], default='train')
     parser.add_argument('--steps', type=int, default=500_000)
+    parser.add_argument('--n_envs', type=int, default=1)
     args = parser.parse_args()
 
     if args.mode == 'train':
-        model, cb = train(total_timesteps=args.steps)
+        model, cb = train(total_timesteps=args.steps, n_envs=args.n_envs)
         plot_training_curves(cb)
     elif args.mode == 'demo':
         demo()
