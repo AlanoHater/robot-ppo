@@ -9,10 +9,12 @@ Limitación de hardware: RTX 4050 laptop (8GB VRAM) →
   - Robot: HumanoidStandup-v4 (17 DoF vs 32 DoF del iCub)
   - Escala: entrenamiento single-env, ~500K steps
 
-Contribución principal implementada:
-  1. Achievement-triggered multi-path reward (DAG)
-  2. CPG signals (coprime sine waves)
-  3. Action clamping proporcional al progreso del episodio
+Contribuciones implementadas (rama feature/multipath-dag-egocentric):
+  1. Achievement-triggered multi-path reward (DAG con bifurcaciones reales,
+     no solo cadena lineal — ver AchievementRewardWrapper)
+  2. Representación ego-centric (velocidades rotadas al frame de la raíz)
+  3. CPG signals (coprime sine waves)
+  4. Action clamping proporcional al progreso del episodio
 
 Instalación:
   pip install gymnasium[mujoco] stable-baselines3 matplotlib numpy
@@ -36,11 +38,25 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 class AchievementRewardWrapper(Wrapper):
     """
-    Implementa el grafo dirigido acíclico (DAG) de recompensas del paper.
+    Implementa el grafo dirigido acíclico (DAG) de recompensas del paper,
+    con soporte genérico para bifurcaciones (varios padres por nodo), como
+    en el grafo real del paper (Crouch y Crawl convergen ambos en Stand).
 
-    Grafo de habilidades (versión simplificada para HumanoidStandup-v4):
+    Grafo de habilidades (versión multi-path para HumanoidStandup-v4):
 
-        Lift --[PS=1.0]--> StandUp --[PS=4.0]--> Upright
+        pelvis_lift  --[PS]--\
+                               > standup --[PS]--\
+        leg_extension --[PS]--/                   > upright
+        torso_straighten --------------[PS]-------/
+
+    'pelvis_lift', 'leg_extension' y 'torso_straighten' son señales raíz
+    (sin padres) propuestas como proxy de las distintas estrategias con que
+    un humanoide de 17 DoF puede empezar a incorporarse — no son las
+    habilidades literales del paper (Roll/Kneel/Crouch/Crawl, pensadas para
+    el iCub partiendo de posición supina), sino un análogo adaptado a
+    HumanoidStandup-v4. Cualquier nodo puede tener 0 o más padres; los
+    nodos sin padre (raíz) se suman siempre, los demás solo se activan
+    cuando ALGUNO de sus padres supera su passing score (OR ponderado).
 
     Fórmulas del paper:
         A_ij,0 = 0
@@ -48,21 +64,45 @@ class AchievementRewardWrapper(Wrapper):
         R_t    = sum_i sum_j (A_ij,t * R_j,t)
     """
 
-    SKILL_NAMES = ['lift', 'standup', 'upright']
-    DEFAULT_PS  = {(0, 1): 0.3, (1, 2): 4.0}
+    SKILL_NAMES = ['pelvis_lift', 'leg_extension', 'standup', 'torso_straighten', 'upright']
+    DEFAULT_PS  = {
+        (0, 2): 0.3,   # pelvis_lift   -> standup
+        (1, 2): 0.5,   # leg_extension -> standup  (camino alternativo)
+        (2, 4): 4.0,   # standup       -> upright
+        (3, 4): 0.3,   # torso_straighten -> upright (camino alternativo)
+    }
 
     def __init__(self, env, passing_scores=None, use_cpg=True,
-                 use_action_clamp=True, episode_max_steps=1000):
+                 use_action_clamp=True, use_egocentric=True, episode_max_steps=1000):
         super().__init__(env)
 
         self.passing_scores    = passing_scores or self.DEFAULT_PS
         self.use_cpg           = use_cpg
         self.use_action_clamp  = use_action_clamp
+        self.use_egocentric    = use_egocentric
         self.episode_max_steps = episode_max_steps
+
+        # Nodos raíz: los que nunca aparecen como destino (j) de ninguna arista.
+        targets    = {j for (_, j) in self.passing_scores}
+        n_skills   = len(self.SKILL_NAMES)
+        self.roots = [i for i in range(n_skills) if i not in targets]
 
         # CPG: primeros 8 primos / 4 → rango 0.5–5 Hz (igual que el paper)
         primes = [2, 3, 5, 7, 11, 13, 17, 19]
         self.cpg_freqs = np.array(primes, dtype=np.float32) / 4.0
+
+        obs_dim = env.observation_space.shape[0]
+        # Offsets del vector de obs de HumanoidStandup-v4 (nq=24, nv=23):
+        #   qpos[2:]  -> 22   (0:22)
+        #   qvel      -> 23   (22:45)   raíz libre: lineal qvel[22:25], angular qvel[25:28]
+        #   cinert    -> 140  (45:185)
+        #   cvel      -> 84   (185:269) 14 cuerpos * 6 (angular(3)+lineal(3)) en frame mundo
+        #   qfrc_act. -> 23   (269:292)
+        #   cfrc_ext  -> 84   (292:376)
+        assert obs_dim == 376, f"offsets ego-centric asumen obs_dim=376, recibido {obs_dim}"
+        self._qvel_root_slice = slice(22, 28)
+        self._cvel_slice      = slice(185, 269)
+        self._n_bodies        = 14
 
         if self.use_cpg:
             n_cpg = len(self.cpg_freqs) * 2
@@ -71,6 +111,57 @@ class AchievementRewardWrapper(Wrapper):
             self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
 
         self._reset_episode_state()
+
+    @staticmethod
+    def _rotate_by_inv_quat(v, quat):
+        """Rota el vector 3D v por la inversa del quaternion (w,x,y,z)."""
+        w, x, y, z = quat
+        # Quaternion inverso (unitario): conjugado (w,-x,-y,-z)
+        qi = np.array([w, -x, -y, -z], dtype=np.float64)
+        qv = np.array([0.0, v[0], v[1], v[2]], dtype=np.float64)
+
+        def qmul(a, b):
+            aw, ax, ay, az = a
+            bw, bx, by, bz = b
+            return np.array([
+                aw*bw - ax*bx - ay*by - az*bz,
+                aw*bx + ax*bw + ay*bz - az*by,
+                aw*by - ax*bz + ay*bw + az*bx,
+                aw*bz + ax*by - ay*bx + az*bw,
+            ])
+
+        q_conj = np.array([qi[0], -qi[1], -qi[2], -qi[3]])
+        res = qmul(qmul(qi, qv), q_conj)
+        return res[1:]
+
+    def _egocentrize_obs(self, obs, root_quat):
+        """
+        Transforma las velocidades de qvel (raíz) y cvel (todos los cuerpos)
+        del frame mundo al frame de la raíz del robot, según la
+        representación ego-centric del paper (Sección III.B).
+        """
+        obs = obs.copy()
+
+        lin = obs[22:25]
+        ang = obs[25:28]
+        obs[22:25] = self._rotate_by_inv_quat(lin, root_quat)
+        obs[25:28] = self._rotate_by_inv_quat(ang, root_quat)
+
+        cvel = obs[self._cvel_slice].reshape(self._n_bodies, 6)
+        for b in range(self._n_bodies):
+            cvel[b, 0:3] = self._rotate_by_inv_quat(cvel[b, 0:3], root_quat)
+            cvel[b, 3:6] = self._rotate_by_inv_quat(cvel[b, 3:6], root_quat)
+        obs[self._cvel_slice] = cvel.reshape(-1)
+
+        return obs
+
+    def _process_obs(self, obs):
+        if self.use_egocentric:
+            root_quat = self.env.unwrapped.data.qpos[3:7]
+            obs = self._egocentrize_obs(obs, root_quat)
+        if self.use_cpg:
+            obs = np.concatenate([obs, self._cpg_signal()]).astype(np.float32)
+        return obs
 
     def _reset_episode_state(self):
         self.achievements = {k: 0.0 for k in self.passing_scores}
@@ -86,28 +177,30 @@ class AchievementRewardWrapper(Wrapper):
         data = self.env.unwrapped.data
         z    = float(data.qpos[2])
 
-        r_lift    = np.clip(z - 0.30, 0.0, None) * 3.0
-        r_standup = np.clip(z - 0.80, 0.0, None) * 8.0
-        r_upright = np.clip(z - 1.00, 0.0, None) * 8.0
+        # qpos[13]=right_knee, qpos[17]=left_knee (range real ~[-2.79, -0.035] rad)
+        knee_ext  = (float(data.qpos[13]) + float(data.qpos[17])) / 2.0 + 2.79
+        # qpos[8]=abdomen_y (flexión/extensión de columna, range ~[-1.31, 0.52] rad)
+        abdomen_y = float(data.qpos[8])
 
-        return [r_lift, r_standup, r_upright]
+        r_pelvis_lift     = np.clip(z - 0.30, 0.0, None) * 3.0
+        r_leg_extension   = np.clip(knee_ext, 0.0, None) * 1.0
+        r_standup         = np.clip(z - 0.80, 0.0, None) * 8.0
+        r_torso_straight  = np.clip(1.31 - abs(abdomen_y), 0.0, None) * 1.5
+        r_upright         = np.clip(z - 1.00, 0.0, None) * 8.0
+
+        return [r_pelvis_lift, r_leg_extension, r_standup, r_torso_straight, r_upright]
 
     def _dag_reward(self, stage_rewards):
-        total = stage_rewards[0]
-        a01   = self.achievements.get((0, 1), 0.0)
-        if a01 > 0:
-            total += a01 * stage_rewards[1]
-        a12 = self.achievements.get((1, 2), 0.0)
-        if a12 > 0:
-            total += a12 * stage_rewards[2]
+        total = sum(stage_rewards[r] for r in self.roots)
+        for (i, j), a in self.achievements.items():
+            if a > 0:
+                total += a * stage_rewards[j]
         return total
 
     def reset(self, **kwargs):
         self._reset_episode_state()
         obs, info = self.env.reset(**kwargs)
-        if self.use_cpg:
-            obs = np.concatenate([obs, self._cpg_signal()]).astype(np.float32)
-        return obs, info
+        return self._process_obs(obs), info
 
     def step(self, action):
         if self.use_action_clamp:
@@ -129,10 +222,7 @@ class AchievementRewardWrapper(Wrapper):
                      'achievements' : dict(self.achievements),
                      'dag_reward'   : total_reward})
 
-        if self.use_cpg:
-            obs = np.concatenate([obs, self._cpg_signal()]).astype(np.float32)
-
-        return obs, float(total_reward), terminated, truncated, info
+        return self._process_obs(obs), float(total_reward), terminated, truncated, info
 
 
 # ================================================================
@@ -140,12 +230,13 @@ class AchievementRewardWrapper(Wrapper):
 # ================================================================
 
 class DAGRewardCallback(BaseCallback):
-    def __init__(self, n_skills=3, verbose=0):
+    def __init__(self, n_skills=None, verbose=0):
         super().__init__(verbose)
         self.skill_names    = AchievementRewardWrapper.SKILL_NAMES
+        self.n_skills       = n_skills or len(self.skill_names)
         self.ep_max_skill   = []
         self.ep_total       = []
-        self._ep_skill_max  = [0.0] * n_skills
+        self._ep_skill_max  = [0.0] * self.n_skills
         self._ep_total      = 0.0
 
     def _on_step(self) -> bool:
@@ -154,14 +245,14 @@ class DAGRewardCallback(BaseCallback):
         dones   = self.locals.get('dones', [False])
 
         for i, info in enumerate(infos):
-            sr = info.get('stage_rewards', [0.0, 0.0, 0.0])
-            for k in range(3):
+            sr = info.get('stage_rewards', [0.0] * self.n_skills)
+            for k in range(self.n_skills):
                 self._ep_skill_max[k] = max(self._ep_skill_max[k], sr[k])
             self._ep_total += rewards[i] if i < len(rewards) else 0.0
             if dones[i]:
                 self.ep_max_skill.append(list(self._ep_skill_max))
                 self.ep_total.append(self._ep_total)
-                self._ep_skill_max = [0.0, 0.0, 0.0]
+                self._ep_skill_max = [0.0] * self.n_skills
                 self._ep_total     = 0.0
         return True
 
@@ -170,7 +261,7 @@ class DAGRewardCallback(BaseCallback):
 # 3.  PLOTS
 # ================================================================
 
-SKILL_COLORS = ['#e06c75', '#e5c07b', '#98c379']
+SKILL_COLORS = ['#e06c75', '#d19a66', '#e5c07b', '#61afef', '#98c379']
 
 def smooth(x, w=5):
     if len(x) < w:
@@ -236,7 +327,7 @@ def plot_training_curves(callback, save_path='results.png'):
 
 def make_env():
     base = gym.make('HumanoidStandup-v4')
-    env  = AchievementRewardWrapper(base, use_cpg=True, use_action_clamp=True)
+    env  = AchievementRewardWrapper(base, use_cpg=True, use_action_clamp=True, use_egocentric=True)
     return Monitor(env)
 
 def train(total_timesteps=500_000, save_path='dag_humanoid_model', n_envs=1):
@@ -276,7 +367,7 @@ def train(total_timesteps=500_000, save_path='dag_humanoid_model', n_envs=1):
 def demo(model_path='dag_humanoid_model'):
     model = PPO.load(model_path)
     env   = gym.make('HumanoidStandup-v4', render_mode='human')
-    env   = AchievementRewardWrapper(env, use_cpg=True, use_action_clamp=False)
+    env   = AchievementRewardWrapper(env, use_cpg=True, use_action_clamp=False, use_egocentric=True)
     obs, _ = env.reset()
     for _ in range(2000):
         action, _ = model.predict(obs, deterministic=True)
@@ -287,10 +378,11 @@ def demo(model_path='dag_humanoid_model'):
 
 def run_ablation(timesteps=150_000):
     configs = {
-        'DAG completo'    : dict(use_cpg=True,  use_action_clamp=True),
-        'Sin CPG'         : dict(use_cpg=False, use_action_clamp=True),
-        'Sin action clamp': dict(use_cpg=True,  use_action_clamp=False),
-        'Sin CPG ni clamp': dict(use_cpg=False, use_action_clamp=False),
+        'DAG completo'      : dict(use_cpg=True,  use_action_clamp=True,  use_egocentric=True),
+        'Sin CPG'           : dict(use_cpg=False, use_action_clamp=True,  use_egocentric=True),
+        'Sin action clamp'  : dict(use_cpg=True,  use_action_clamp=False, use_egocentric=True),
+        'Sin ego-centric'   : dict(use_cpg=True,  use_action_clamp=True,  use_egocentric=False),
+        'Ninguno'           : dict(use_cpg=False, use_action_clamp=False, use_egocentric=False),
     }
     results = {}
     for name, cfg in configs.items():
@@ -306,7 +398,7 @@ def run_ablation(timesteps=150_000):
 
     fig, ax = plt.subplots(figsize=(9, 5), facecolor='#1e1e2e')
     ax.set_facecolor('#282a36')
-    colors = ['#89b4fa', '#f38ba8', '#a6e3a1', '#f9e2af']
+    colors = ['#89b4fa', '#f38ba8', '#a6e3a1', '#f9e2af', '#cba6f7']
     for (name, vals), col in zip(results.items(), colors):
         w = max(3, len(vals) // 8)
         ax.plot(vals, alpha=0.15, color=col)
