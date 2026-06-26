@@ -216,15 +216,71 @@ paralelo, ~41 min):**
   SB3 (ese viene de `Monitor`, una fuente independiente) — solo ese gráfico.
   Corregido en el código (acumuladores por entorno) para corridas futuras.
 
-Conclusión honesta: con este presupuesto de muestras (3M steps, MuJoCo CPU),
+Conclusión (v2): con este presupuesto de muestras (3M steps, MuJoCo CPU),
 ni la topología DAG lineal (`main`) ni la de bifurcaciones + ego-centric
-(esta rama) logran que el agente se ponga de pie. El reward shaping evita el
-problema de "nunca hay señal" (el agente sí aprende *algo*, las curvas
-suben), pero ese "algo" termina siendo explotar las señales más fáciles de
-conseguir en vez de progresar hacia el objetivo real — un recordatorio de
-que el paper original logra resultados con miles de entornos paralelos en
-Isaac Gym y decenas de millones de steps, dos a tres órdenes de magnitud más
-que lo disponible aquí.
+lograban que el agente se levantara. **Pero esa conclusión resultó
+incompleta** — ver la iteración siguiente, que identificó la verdadera causa
+raíz y sí consiguió que el robot se incorporara.
+
+### Iteración v3 — reward de altura continuo (el robot por fin se levanta del piso)
+
+Tras la corrida v2 se hizo una verificación directa (cargar el modelo
+entrenado y medir la altura real del torso `z` durante un episodio) en vez de
+seguir suponiendo. El resultado fue revelador:
+
+| | valor |
+|---|---|
+| `z` inicial (acostado) | 0.103 |
+| `z` durante todo el episodio v2 | min 0.076 · mean 0.116 · **max 0.152** |
+| umbral de `pelvis_lift` (v2) | z > **0.30** |
+| % de steps con z > 0.30 | **0.0 %** |
+
+**La causa raíz no era la topología del DAG ni la representación ego-centric:
+era el reward de altura.** `clip(z - 0.30, 0, None)` vale exactamente 0 —y su
+gradiente es 0— para todo z < 0.30, pero el robot vivía en z ∈ [0.076, 0.152].
+Las tres señales de altura (`pelvis_lift`, `standup`, `upright`) estaban
+**muertas** en todo el rango alcanzable: el agente nunca recibía la más mínima
+señal de "sube un poco", así que lo único que podía optimizar eran las señales
+de ángulo, y por eso las farmeaba. Un mínimo local perfecto.
+
+Corrección (commit del fix v3):
+- **Reward de altura: umbral → rampa continua.** Rampas solapadas con
+  gradiente no-cero *desde el suelo*, de modo que cada centímetro que sube `z`
+  dé más recompensa:
+  - `pelvis_lift = clip((z-0.10)/0.20, 0, 1)`  (despegar: 0.10→0.30)
+  - `standup     = clip((z-0.30)/0.50, 0, 1)`  (sentarse: 0.30→0.80)
+  - `upright     = clip((z-0.80)/0.50, 0, 1)`  (pararse:  0.80→1.30)
+- **Passing scores** recalibrados al nuevo rango [0,1] (`(0,2)`:0.5, `(2,4)`:0.5).
+- **Hiperparámetros PPO** (la inestabilidad observada en v2): `n_epochs`
+  10→5, `batch_size` 256→512, `ent_coef` 0.005→0, y se agregó `target_kl=0.03`.
+
+Resultado de la corrida completa v3 (3M steps, 10 envs, ~40 min):
+
+| métrica | v2 (reward roto) | **v3 (rampa de altura)** |
+|---|---|---|
+| `ep_rew_mean` final | ~67 (plano) | **~850** (sube sostenido) |
+| `z` máximo alcanzado | 0.152 | **0.450** (~3×) |
+| `z` promedio | 0.116 | **0.291** |
+| % tiempo despegado (z>0.30) | 0 % | **42 %** |
+| `standup` (skill) | 0.0 plano | **~0.25** (despega) |
+| `std` de PPO | 4.4 explotando | **0.94 estable** |
+| `approx_kl` / `clip_fraction` | 0.40 / 0.70 | **0.035 / 0.21** |
+
+El robot pasó de **retorcerse acostado sin despegar del piso** (v2) a hacer un
+**esfuerzo coordinado de incorporarse**: dobla las piernas, arquea la pelvis y
+empuja el torso hacia arriba hasta z≈0.45, pasando ~42 % del episodio con el
+cuerpo despegado del suelo. No llega a sentarse del todo (z>0.55: 0 %) ni a
+pararse (`upright` sigue en 0), pero es un progreso real, medible y
+visualmente claro. Evidencia en video: `demo_v3_height.mp4` (v3, se levanta)
+vs `demo_multipath_egocentric.mp4` (v2, plano en el piso).
+
+Lección para el reporte: el reward shaping del paper funciona, pero es
+extremadamente sensible a que cada señal tenga gradiente *en la región donde
+el agente realmente opera*. Un umbral mal colocado convierte una señal densa
+en una sparse de facto, y el agente —racionalmente— explota lo que sí da
+recompensa. El bug no se veía en las métricas de PPO (que parecían "aprender")
+ni en el reward total; solo apareció al medir la cantidad física (`z`) que se
+suponía debía optimizar.
 
 ## Limitaciones conocidas
 

@@ -22,6 +22,11 @@ Instalación:
 
 import os
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')   # backend no-interactivo: plt.show() no bloquea ni
+                        # abre ventana (evita que el proceso se cuelgue al
+                        # final del entrenamiento). results.png se guarda
+                        # igual con savefig; ábrelo como imagen.
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import gymnasium as gym
@@ -65,11 +70,14 @@ class AchievementRewardWrapper(Wrapper):
     """
 
     SKILL_NAMES = ['pelvis_lift', 'leg_extension', 'standup', 'torso_straighten', 'upright']
+    # Passing scores recalibrados a las rampas de altura [0,1] (ver
+    # _compute_stage_rewards). Un nodo de altura se desbloquea cuando su
+    # padre ya avanzó parte de su tramo:
     DEFAULT_PS  = {
-        (0, 2): 0.3,    # pelvis_lift   -> standup
-        (1, 2): 0.03,   # leg_extension -> standup  (camino alternativo; max posible = 1.5*0.03 = 0.045)
-        (2, 4): 4.0,    # standup       -> upright
-        (3, 4): 0.02,   # torso_straighten -> upright (camino alternativo; max posible = 1.0*0.03 = 0.03)
+        (0, 2): 0.5,    # pelvis_lift>0.5 (z>0.20) desbloquea standup
+        (1, 2): 0.02,   # leg_extension -> standup  (camino alternativo débil)
+        (2, 4): 0.5,    # standup>0.5 (z>0.55) desbloquea upright
+        (3, 4): 0.015,  # torso_straighten -> upright (camino alternativo débil)
     }
 
     def __init__(self, env, passing_scores=None, use_cpg=True,
@@ -175,26 +183,31 @@ class AchievementRewardWrapper(Wrapper):
         data = self.env.unwrapped.data
         z    = float(data.qpos[2])
 
-        # qpos[13]=right_knee, qpos[17]=left_knee, qpos[8]=abdomen_y.
-        # Ambos empiezan ~0 al resetear (medido empíricamente). Probado y
-        # descartado: |desviación| de la línea base (ruido simétrico da
-        # ~3000 de reward sin progreso real) y ángulo con signo sin escala
-        # chica (ruido sin entrenar seguía dando ~1770, porque un solo
-        # ángulo de articulación se puede mover con torque aislado, sin
-        # necesidad de coordinar el cuerpo contra la gravedad como sí exige
-        # la altura). Bajo estrés con acciones aleatorias de rango completo,
-        # r_pelvis_lift da 0 en el 100% de los casos (la altura SÍ requiere
-        # esfuerzo coordinado) — por eso estas dos señales se escalan muy
-        # por debajo de r_pelvis_lift: son un empujón de exploración, no una
-        # fuente de recompensa que pueda competir con la señal de altura.
+        # --- Señales de altura: RAMPAS CONTINUAS, no umbrales -------------
+        # Bug encontrado en la corrida v2 (verificado empíricamente): el
+        # robot vive en z ∈ [0.076, 0.152] (acostado ~0.10, de pie ~1.4) y
+        # los umbrales anteriores —clip(z-0.30,...), clip(z-0.80,...)— daban
+        # EXACTAMENTE 0 (y gradiente 0) en todo ese rango: 0% de los steps
+        # superaban z=0.30. Las señales de altura estaban muertas, así que el
+        # agente solo podía farmear las de ángulo y nunca tenía incentivo de
+        # subir. La corrección: rampas solapadas con gradiente no-cero DESDE
+        # el suelo, de modo que cada centímetro que sube z dé más recompensa.
+        #   pelvis_lift: despegar  0.10 -> 0.30
+        #   standup    : sentarse  0.30 -> 0.80
+        #   upright    : pararse   0.80 -> 1.30
+        r_pelvis_lift = np.clip((z - 0.10) / 0.20, 0.0, 1.0)
+        r_standup     = np.clip((z - 0.30) / 0.50, 0.0, 1.0)
+        r_upright     = np.clip((z - 0.80) / 0.50, 0.0, 1.0)
+
+        # --- Señales de ángulo: empujones de exploración pequeños ---------
+        # qpos[13]=right_knee, qpos[17]=left_knee, qpos[8]=abdomen_y. Ambos
+        # empiezan ~0 al resetear; ángulo con signo y escala chica (×0.02)
+        # para que NO compitan con las rampas de altura (que llegan a 1.0).
+        # Máximos: leg_extension ≤ 0.03, torso_straighten ≤ 0.02.
         knee_now    = (float(data.qpos[13]) + float(data.qpos[17])) / 2.0
         abdomen_now = float(data.qpos[8])
-
-        r_pelvis_lift     = np.clip(z - 0.30, 0.0, None) * 3.0
-        r_leg_extension   = np.clip(-knee_now - 0.05, 0.0, 1.5) * 0.03
-        r_standup         = np.clip(z - 0.80, 0.0, None) * 8.0
-        r_torso_straight  = np.clip(-abdomen_now - 0.05, 0.0, 1.0) * 0.03
-        r_upright         = np.clip(z - 1.00, 0.0, None) * 8.0
+        r_leg_extension   = np.clip(-knee_now - 0.05, 0.0, 1.5) * 0.02
+        r_torso_straight  = np.clip(-abdomen_now - 0.05, 0.0, 1.0) * 0.02
 
         return [r_pelvis_lift, r_leg_extension, r_standup, r_torso_straight, r_upright]
 
@@ -360,18 +373,29 @@ def train(total_timesteps=500_000, save_path='dag_humanoid_model', n_envs=1):
     else:
         env = DummyVecEnv([make_env])
 
+    # Hiperparámetros revisados tras la corrida v2: aquella mostraba
+    # approx_kl≈0.4 (sano <0.02), clip_fraction≈0.7 (sano <0.3) y std de las
+    # acciones explotando a 4.4 — política cada vez más errática en vez de
+    # converger. Causa: demasiados updates agresivos por rollout + ent_coef
+    # empujando la varianza sin freno. Correcciones:
+    #   n_epochs 10->5, batch_size 256->512  (menos updates por rollout)
+    #   ent_coef 0.005->0.0                  (no inflar std; el reward denso
+    #                                          ya guía la exploración)
+    #   + target_kl=0.03                     (corta epochs si el KL se dispara)
     model = PPO(
         policy        = 'MlpPolicy',
         env           = env,
         n_steps       = 2048,
-        batch_size    = 256,
-        n_epochs      = 10,
+        batch_size    = 512,
+        n_epochs      = 5,
         learning_rate = 3e-4,
         gamma         = 0.99,
+        gae_lambda    = 0.95,
         clip_range    = 0.2,
-        ent_coef      = 0.005,
+        ent_coef      = 0.0,
         vf_coef       = 0.5,
         max_grad_norm = 0.5,
+        target_kl     = 0.03,
         policy_kwargs = dict(net_arch=[400, 300, 200, 100]),
         verbose       = 1,
     )
@@ -393,6 +417,31 @@ def demo(model_path='dag_humanoid_model'):
         if terminated or truncated:
             obs, _ = env.reset()
     env.close()
+
+def record_video(model_path='dag_humanoid_model', out_path='demo.mp4', n_episodes=2, max_steps=1000):
+    import imageio
+
+    model = PPO.load(model_path)
+    env   = gym.make('HumanoidStandup-v4', render_mode='rgb_array')
+    fps   = env.metadata.get('render_fps', 33)
+    env   = AchievementRewardWrapper(env, use_cpg=True, use_action_clamp=False, use_egocentric=True)
+
+    writer = imageio.get_writer(out_path, fps=fps)
+    for ep in range(n_episodes):
+        obs, _ = env.reset()
+        ep_reward = 0.0
+        for _ in range(max_steps):
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, _ = env.step(action)
+            ep_reward += reward
+            writer.append_data(env.render())
+            if terminated or truncated:
+                break
+        print(f"Episodio {ep+1}/{n_episodes}: reward total = {ep_reward:.1f}")
+    writer.close()
+    env.close()
+    print(f"[OK] Video guardado: {out_path}")
+
 
 def run_ablation(timesteps=150_000):
     configs = {
@@ -443,9 +492,11 @@ def run_ablation(timesteps=150_000):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=['train', 'demo', 'ablation'], default='train')
+    parser.add_argument('--mode', choices=['train', 'demo', 'ablation', 'video'], default='train')
     parser.add_argument('--steps', type=int, default=500_000)
     parser.add_argument('--n_envs', type=int, default=1)
+    parser.add_argument('--out', type=str, default='demo.mp4')
+    parser.add_argument('--episodes', type=int, default=2)
     args = parser.parse_args()
 
     if args.mode == 'train':
@@ -455,3 +506,5 @@ if __name__ == '__main__':
         demo()
     elif args.mode == 'ablation':
         run_ablation(timesteps=args.steps)
+    elif args.mode == 'video':
+        record_video(out_path=args.out, n_episodes=args.episodes)
