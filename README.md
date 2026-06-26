@@ -96,8 +96,8 @@ brecha de muestras frente al paper (aunque sigue siendo ~1000x menor).
 
 ```
 dag_reward_humanoid.py             Script principal (rama main: DAG lineal de 3 nodos)
-results.png                        Curvas — entrenamiento con calibración corregida (1M steps, single-env)
-dag_humanoid_model.zip             Modelo de esa corrida
+results.png                        Curvas — calibración corregida, 3M steps, 10 envs en paralelo
+dag_humanoid_model.zip             Modelo de esa corrida (iteración 3)
 train_full.log                     Log de esa corrida
 
 results_v1_buggy.png               Curvas del primer entrenamiento (passing score mal calibrado)
@@ -197,11 +197,45 @@ Cambios aplicados en `dag_reward_humanoid.py`:
   la raíz — consistente con `r_lift` y `r_standup`, que sí usan altura y sí
   demostraron ser señales confiables.
 
-### Iteración 3 — paralelizado, 3M steps (10 envs)
+### Iteración 3 — paralelizado, 3M steps, 10 envs (`results.png` final)
 
-*(Pendiente de completar — corrida en curso. Actualizar con: si `standup`
-deja de estar en 0.0, si se alcanza `upright`, y comparación de
-`results.png` final contra las iteraciones 1 y 2.)*
+Mismo DAG lineal de 3 nodos y calibración de la iteración 2, pero con 3x más
+steps gracias a la paralelización (36 min de pared en vez de las ~4-5 horas
+que habría tomado en single-env). Resultado: **progreso de aprendizaje real
+y medible, pero sin cruzar el umbral de pararse del todo**.
+
+- `lift` (panel a, rojo) muestra una **tendencia ascendente clara** por
+  primera vez: pasa de picos esporádicos de ~0.1 a picos sostenidos de
+  ~0.4-0.55 hacia el final del entrenamiento, con el promedio suavizado
+  subiendo de ~0 a ~0.3. El agente sí está aprendiendo a levantar la pelvis
+  más y de forma más consistente.
+- `standup` y `upright` (naranja/verde) **siguen en 0.0 durante las ~2900
+  episodios completos** — la altura z del robot nunca superó 0.80 ni una
+  sola vez, igual que en las iteraciones 1 y 2. Triplicar el presupuesto de
+  steps no fue suficiente para cruzar ese umbral.
+- El reward total por episodio (panel b) también muestra una **tendencia
+  ascendente clara**, con picos que llegan hasta ~29 hacia el final. Esto
+  **no es un salto de recompensa instantánea** — `ep_total` es la suma
+  acumulada de reward a lo largo de todo el episodio (hasta 1000 steps), así
+  que un pico de 29 es compatible con sostener un `r_lift` modesto (~0.03)
+  durante buena parte del episodio, no con alcanzar `standup`. Confirma que
+  el agente aprendió a *sostener* más tiempo una pelvis ligeramente elevada,
+  no a completarse el pararse.
+- Nota técnica sobre el mecanismo DAG: como `lift` sí superó el nuevo
+  `PS=0.3` en muchos episodios, el achievement `(0,1)` sí se activó (a
+  diferencia de la iteración 1). Pero como `r_standup` (la recompensa cruda,
+  antes de cualquier multiplicador) permaneció en 0 todo el entrenamiento
+  (z nunca > 0.80), el bono `a01 * r_standup` fue **0 de todas formas** —
+  activar el achievement no ayuda si la recompensa que debía amplificar
+  nunca deja de ser cero. La mejora visible en este run viene enteramente de
+  `r_lift` sostenido, no del mecanismo de bono del DAG.
+
+**Conclusión honesta:** la combinación calibración-corregida + más
+paralelismo + 3x más steps sí produjo aprendizaje verificable (algo que la
+iteración 1 nunca mostró), pero el robot todavía no logra completar el
+pararse dentro de este presupuesto de muestras. Es consistente con la brecha
+de ~1000x en steps frente al paper (3M vs 2,000M) documentada en la tabla de
+comparación arriba.
 
 ## Rama experimental: DAG multi-path + ego-centric
 
