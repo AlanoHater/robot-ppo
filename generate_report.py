@@ -54,8 +54,8 @@ story = []
 story.append(Paragraph('Recompensas DAG con <i>Achievement Triggers</i> para un Humanoide', H1))
 story.append(Paragraph('Adaptación del paper <i>From Rolling Over to Walking</i> (Meng &amp; Xiao, 2023) '
                        'a hardware de consumo con PPO y MuJoCo', SUB))
-story.append(Paragraph('Proyecto de Maestría — Aprendizaje por Refuerzo &nbsp;·&nbsp; '
-                       'RTX 4050 Laptop &nbsp;·&nbsp; junio 2026', SUB))
+story.append(Paragraph('Robótica Cognitiva &nbsp;·&nbsp; Universidad Autónoma del Estado de México (UAEM)', SUB))
+story.append(Paragraph('Alan Cabrera &nbsp;y&nbsp; Enrique Albarrán &nbsp;·&nbsp; RTX 4050 Laptop &nbsp;·&nbsp; junio 2026', SUB))
 story.append(Spacer(1, 0.3*cm))
 
 story.append(Paragraph('1. Introducción y objetivo', H2))

@@ -9,6 +9,7 @@
 
 ### De rodar a caminar: recompensas DAG para un humanoide
 
+**Clase:** Robótica Cognitiva — UAEM &nbsp;·&nbsp; **Autores:** Alan Cabrera y Enrique Albarrán
 **Paper base:** Meng & Xiao (2023), *From Rolling Over to Walking* (arXiv:2303.02581)
 **Tarea:** enseñar a un humanoide de 17 DoF (`HumanoidStandup-v4`, MuJoCo) a incorporarse desde el suelo, con **PPO** en una **laptop RTX 4050**.
 

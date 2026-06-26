@@ -6,7 +6,10 @@ Humanoid Robots to Develop Complex Motor Skills"** (Meng & Xiao, 2023,
 una laptop con GPU de consumo (RTX 4050) en lugar del clúster de simulación
 masivamente paralela (Isaac Gym) que usa el paper original.
 
-Proyecto realizado para una clase de maestría — no busca reproducir el paper
+**Clase:** Robótica Cognitiva — Universidad Autónoma del Estado de México (UAEM)
+**Autores:** Alan Cabrera y Enrique Albarrán
+
+Proyecto de la clase de Robótica Cognitiva — no busca reproducir el paper
 al pie de la letra, sino implementar su idea central (reward DAG con
 achievement triggers) a una escala que sea entrenable en hardware de
 consumidor, y documentar honestamente qué tan bien funciona a esa escala.
