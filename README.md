@@ -282,6 +282,37 @@ recompensa. El bug no se veía en las métricas de PPO (que parecían "aprender"
 ni en el reward total; solo apareció al medir la cantidad física (`z`) que se
 suponía debía optimizar.
 
+### Iteración v4 — escapar la pose en "L" con `feet_tuck` (warm-start)  *(en progreso)*
+
+Tras v3 el robot se sienta erguido pero se estanca ahí. Midiendo la geometría
+de la pose final se identificó por qué: el robot quedó en **"sentado en L"**,
+con las piernas extendidas al frente (distancia horizontal pie→torso ≈ 0.80) y
+los pies sin plantar. Es un óptimo local estable pero **un dead-end
+geométrico para pararse**: con los pies extendidos al frente no puede meterlos
+bajo el centro de masa para empujarse hacia arriba. Por eso `upright` se quedó
+en 0 pese a que su rampa de reward sí tenía gradiente.
+
+Intervención (commit de v4):
+- **Nodo nuevo en el DAG: `feet_tuck`** — premia recoger los pies hacia la
+  proyección horizontal del torso (pose de cuclillas), `feet_under =
+  clip(1 - dist/0.5, 0, 1)`, **multiplicado por** `pelvis_lift` para que no
+  sea farmeable ovillándose acostado (solo cuenta con altura). Es nodo raíz
+  (se suma siempre) **y** padre de `upright` — semánticamente, "recoger los
+  pies desbloquea pararse". Verificado: da 0 en la pose en L (empuja a
+  cambiarla) y no es explotable con acciones aleatorias.
+- **Warm-start**: se reanuda desde el modelo v3 (que ya sabe sentarse) en vez
+  de re-entrenar desde cero — nueva opción `--resume_from`.
+- **Exploración reactivada** (`ent_coef` 0 → 0.002, pequeño) para que la
+  política pruebe la transición arriesgada de sentado a cuclillas sin volver a
+  desestabilizarse como en v2.
+
+*(Resultados pendientes de la corrida de warm-start de 3M steps. Lo que se
+busca: que `feet_tuck` se active, que `standup`/`upright` superen a v3, y que
+la pose cambie de "sentado en L" a cuclillas o medio-parado. Expectativa
+honesta: probable recoger piernas y subir algo más; pararse del todo y
+mantenerse de pie sigue siendo el techo difícil de este presupuesto de
+muestras.)*
+
 ## Limitaciones conocidas
 
 - **Presupuesto de muestras bajo**: 1M steps en un solo entorno CPU es órdenes

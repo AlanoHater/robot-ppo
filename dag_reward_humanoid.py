@@ -69,7 +69,7 @@ class AchievementRewardWrapper(Wrapper):
         R_t    = sum_i sum_j (A_ij,t * R_j,t)
     """
 
-    SKILL_NAMES = ['pelvis_lift', 'leg_extension', 'standup', 'torso_straighten', 'upright']
+    SKILL_NAMES = ['pelvis_lift', 'leg_extension', 'standup', 'torso_straighten', 'upright', 'feet_tuck']
     # Passing scores recalibrados a las rampas de altura [0,1] (ver
     # _compute_stage_rewards). Un nodo de altura se desbloquea cuando su
     # padre ya avanzó parte de su tramo:
@@ -78,6 +78,7 @@ class AchievementRewardWrapper(Wrapper):
         (1, 2): 0.02,   # leg_extension -> standup  (camino alternativo débil)
         (2, 4): 0.5,    # standup>0.5 (z>0.55) desbloquea upright
         (3, 4): 0.015,  # torso_straighten -> upright (camino alternativo débil)
+        (5, 4): 0.3,    # feet_tuck>0.3 (pies recogidos bajo el cuerpo) desbloquea upright
     }
 
     def __init__(self, env, passing_scores=None, use_cpg=True,
@@ -117,6 +118,13 @@ class AchievementRewardWrapper(Wrapper):
             low  = np.concatenate([env.observation_space.low,  np.full(n_cpg, -1.0, dtype=np.float32)])
             high = np.concatenate([env.observation_space.high, np.full(n_cpg,  1.0, dtype=np.float32)])
             self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
+
+        # Body-ids para la señal feet_tuck (pies bajo el centro de masa).
+        import mujoco
+        m = env.unwrapped.model
+        self._bid_torso = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'torso')
+        self._bid_rfoot = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'right_foot')
+        self._bid_lfoot = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'left_foot')
 
     @staticmethod
     def _rotate_by_inv_quat(v, quat):
@@ -209,7 +217,25 @@ class AchievementRewardWrapper(Wrapper):
         r_leg_extension   = np.clip(-knee_now - 0.05, 0.0, 1.5) * 0.02
         r_torso_straight  = np.clip(-abdomen_now - 0.05, 0.0, 1.0) * 0.02
 
-        return [r_pelvis_lift, r_leg_extension, r_standup, r_torso_straight, r_upright]
+        # --- feet_tuck: pies bajo el centro de masa (pose de cuclillas) ----
+        # Diagnóstico v3: el robot quedó atrapado en "sentado en L" (pies
+        # extendidos al frente, dist horiz ~0.80 del torso) — un dead-end
+        # geométrico para pararse, porque no puede meter los pies bajo el CoM
+        # para empujarse. Esta señal premia recoger los pies hacia la
+        # proyección horizontal del torso. feet_under: 1 si pies bajo el
+        # cuerpo (dist≤0), 0 si extendidos (dist≥0.5). Se MULTIPLICA por
+        # r_pelvis_lift (rampa de altura desde el suelo) para que NO se pueda
+        # farmear ovillándose acostado: solo cuenta cuando ya hay altura.
+        # Escala ×1.0 para que sea competitiva con las señales de altura y
+        # realmente saque a la política del atractor de la pose en L.
+        torso_xy = data.xpos[self._bid_torso][:2]
+        rfoot_xy = data.xpos[self._bid_rfoot][:2]
+        lfoot_xy = data.xpos[self._bid_lfoot][:2]
+        dist = (np.linalg.norm(rfoot_xy - torso_xy) + np.linalg.norm(lfoot_xy - torso_xy)) / 2.0
+        feet_under  = np.clip(1.0 - dist / 0.5, 0.0, 1.0)
+        r_feet_tuck = r_pelvis_lift * feet_under
+
+        return [r_pelvis_lift, r_leg_extension, r_standup, r_torso_straight, r_upright, r_feet_tuck]
 
     def _dag_reward(self, stage_rewards):
         total = sum(stage_rewards[r] for r in self.roots)
@@ -292,7 +318,7 @@ class DAGRewardCallback(BaseCallback):
 # 3.  PLOTS
 # ================================================================
 
-SKILL_COLORS = ['#e06c75', '#d19a66', '#e5c07b', '#61afef', '#98c379']
+SKILL_COLORS = ['#e06c75', '#d19a66', '#e5c07b', '#61afef', '#98c379', '#c678dd']
 
 def smooth(x, w=5):
     if len(x) < w:
@@ -361,11 +387,14 @@ def make_env():
     env  = AchievementRewardWrapper(base, use_cpg=True, use_action_clamp=True, use_egocentric=True)
     return Monitor(env)
 
-def train(total_timesteps=500_000, save_path='dag_humanoid_model', n_envs=1):
+def train(total_timesteps=500_000, save_path='dag_humanoid_model', n_envs=1,
+          resume_from=None, ent_coef=0.0):
     print("=" * 60)
     print("DAG Reward Humanoid  —  Meng & Xiao (2023) adaptation")
     print(f"Total timesteps: {total_timesteps:,}")
     print(f"Entornos paralelos: {n_envs}")
+    if resume_from:
+        print(f"Warm-start desde: {resume_from}.zip  (ent_coef={ent_coef})")
     print("=" * 60)
 
     if n_envs > 1:
@@ -382,26 +411,37 @@ def train(total_timesteps=500_000, save_path='dag_humanoid_model', n_envs=1):
     #   ent_coef 0.005->0.0                  (no inflar std; el reward denso
     #                                          ya guía la exploración)
     #   + target_kl=0.03                     (corta epochs si el KL se dispara)
-    model = PPO(
-        policy        = 'MlpPolicy',
-        env           = env,
-        n_steps       = 2048,
-        batch_size    = 512,
-        n_epochs      = 5,
-        learning_rate = 3e-4,
-        gamma         = 0.99,
-        gae_lambda    = 0.95,
-        clip_range    = 0.2,
-        ent_coef      = 0.0,
-        vf_coef       = 0.5,
-        max_grad_norm = 0.5,
-        target_kl     = 0.03,
-        policy_kwargs = dict(net_arch=[400, 300, 200, 100]),
-        verbose       = 1,
-    )
+    if resume_from and os.path.exists(resume_from + '.zip'):
+        # Warm-start: continuar desde un modelo ya entrenado (p.ej. v3, que
+        # aprendió a sentarse) en vez de re-aprender desde cero. El obs/action
+        # space no cambió con feet_tuck, así que el modelo carga tal cual; el
+        # value function se readapta al nuevo reward (que ahora incluye tuck).
+        # ent_coef>0 reactiva algo de exploración para escapar el óptimo local
+        # de la pose en "L".
+        model = PPO.load(resume_from, env=env)
+        model.ent_coef = ent_coef
+    else:
+        model = PPO(
+            policy        = 'MlpPolicy',
+            env           = env,
+            n_steps       = 2048,
+            batch_size    = 512,
+            n_epochs      = 5,
+            learning_rate = 3e-4,
+            gamma         = 0.99,
+            gae_lambda    = 0.95,
+            clip_range    = 0.2,
+            ent_coef      = ent_coef,
+            vf_coef       = 0.5,
+            max_grad_norm = 0.5,
+            target_kl     = 0.03,
+            policy_kwargs = dict(net_arch=[400, 300, 200, 100]),
+            verbose       = 1,
+        )
 
     callback = DAGRewardCallback(n_envs=n_envs)
-    model.learn(total_timesteps=total_timesteps, callback=callback, progress_bar=True)
+    model.learn(total_timesteps=total_timesteps, callback=callback, progress_bar=True,
+                reset_num_timesteps=(resume_from is None))
     model.save(save_path)
     print(f"\n[OK] Modelo guardado: {save_path}.zip")
     return model, callback
@@ -497,10 +537,15 @@ if __name__ == '__main__':
     parser.add_argument('--n_envs', type=int, default=1)
     parser.add_argument('--out', type=str, default='demo.mp4')
     parser.add_argument('--episodes', type=int, default=2)
+    parser.add_argument('--resume_from', type=str, default=None,
+                        help='Ruta (sin .zip) de un modelo para warm-start')
+    parser.add_argument('--ent_coef', type=float, default=0.0,
+                        help='Coef. de entropía (subir para reactivar exploración en warm-start)')
     args = parser.parse_args()
 
     if args.mode == 'train':
-        model, cb = train(total_timesteps=args.steps, n_envs=args.n_envs)
+        model, cb = train(total_timesteps=args.steps, n_envs=args.n_envs,
+                          resume_from=args.resume_from, ent_coef=args.ent_coef)
         plot_training_curves(cb)
     elif args.mode == 'demo':
         demo()
