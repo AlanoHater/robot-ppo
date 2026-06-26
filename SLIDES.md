@@ -27,10 +27,12 @@
 A_ij,t = max(A_ij,t-1,  R_i,t − PS_ij)        R_t = Σ_i Σ_j  A_ij,t · R_j,t
 ```
 
-> 🖼️ **IMAGEN 1 — `dag_diagram.png`**
-> **Dónde:** centro/abajo de la diapositiva, ancho grande (es la imagen principal aquí).
+> 🖼️ **DIAGRAMA 1 — `dag_diagram.html`** (se abre en el navegador)
+> **Dónde:** centro/abajo de la diapositiva, ancho grande (es el visual principal aquí).
 > **Qué muestra:** la estructura del DAG (pelvis_lift → standup → upright + señales auxiliares).
 > **Para qué:** explicar visualmente el mecanismo de recompensa encadenada.
+> **Cómo usarlo:** ábrelo en el navegador a pantalla completa (F11) y proyéctalo,
+> o captura la pantalla para pegarlo como imagen en la diapositiva.
 
 **Pie (texto pequeño):** Adaptación a hardware de consumo: MuJoCo CPU (no Isaac
 Gym), 17 DoF (no iCub 32 DoF), ~3–6M steps (no decenas de millones), + CPG,
@@ -104,6 +106,6 @@ diagnóstico riguroso documentado iteración por iteración.
 
 | Diapositiva | Imagen principal | Extra |
 |-------------|------------------|-------|
-| 1 (idea) | `dag_diagram.png` | — |
+| 1 (idea) | `dag_diagram.html` (navegador) | — |
 | 2 (proceso/resultado) | `compare_v2_v3.png` | 🎬 video `demo_v3_height.mp4` en vivo |
 | 3 (hallazgos/cierre) | `results_v3_height.png` | `pose_sequence_v3.png` |

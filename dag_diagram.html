@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DAG de recompensas — Achievement Triggers</title>
+<style>
+  :root{
+    --bg:#1e1e2e; --panel:#282a36; --muted:#9aa5b1; --txt:#ffffff;
+    --pelvis:#e06c75; --standup:#e5c07b; --upright:#98c379;
+    --leg:#d19a66; --torso:#61afef;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; min-height:100vh; background:var(--bg); color:var(--txt);
+    font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    padding:24px;
+  }
+  h1{font-size:clamp(18px,2.6vw,30px); margin:0 0 4px; text-align:center;}
+  .sub{color:var(--muted); font-size:clamp(12px,1.5vw,16px); margin-bottom:18px; text-align:center;}
+  svg{width:100%; max-width:1100px; height:auto;}
+  .node-box{fill:var(--panel); stroke-width:3; rx:14;}
+  .node-title{fill:var(--txt); font-weight:700; font-size:21px; text-anchor:middle;}
+  .node-sub{fill:var(--muted); font-size:13px; text-anchor:middle;}
+  .edge{stroke-width:3; fill:none;}
+  .ps{font-size:14px; font-style:italic; text-anchor:middle; font-weight:600;}
+  .formula{
+    margin-top:18px; color:var(--muted); font-size:clamp(12px,1.5vw,15px);
+    font-style:italic; text-align:center; max-width:1100px;
+  }
+  code{background:#11111b; padding:2px 7px; border-radius:5px; color:#cdd6f4; font-size:0.95em;}
+</style>
+</head>
+<body>
+  <h1>DAG de recompensas con <em>achievement triggers</em></h1>
+  <div class="sub">Robótica Cognitiva — UAEM · Alan Cabrera y Enrique Albarrán</div>
+
+  <svg viewBox="0 0 1100 520" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="ar-main" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#e5c07b"/>
+      </marker>
+      <marker id="ar-leg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#d19a66"/>
+      </marker>
+      <marker id="ar-torso" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#61afef"/>
+      </marker>
+    </defs>
+
+    <!-- Edges (debajo de los nodos) -->
+    <path class="edge" d="M270,165 L440,165" stroke="#e5c07b" marker-end="url(#ar-main)"/>
+    <text class="ps" x="355" y="150" fill="#e5c07b">PS = 0.5</text>
+
+    <path class="edge" d="M660,165 L830,165" stroke="#e5c07b" marker-end="url(#ar-main)"/>
+    <text class="ps" x="745" y="150" fill="#e5c07b">PS = 0.5</text>
+
+    <path class="edge" d="M360,360 L505,225" stroke="#d19a66" marker-end="url(#ar-leg)"/>
+    <text class="ps" x="395" y="305" fill="#d19a66">PS = 0.02</text>
+
+    <path class="edge" d="M760,360 L905,225" stroke="#61afef" marker-end="url(#ar-torso)"/>
+    <text class="ps" x="795" y="305" fill="#61afef">PS = 0.015</text>
+
+    <!-- Cadena principal de altura -->
+    <g>
+      <rect class="node-box" x="70"  y="120" width="200" height="95" rx="14" stroke="var(--pelvis)"/>
+      <text class="node-title" x="170" y="160">pelvis_lift</text>
+      <text class="node-sub"   x="170" y="188">altura z: 0.10 → 0.30</text>
+
+      <rect class="node-box" x="460" y="120" width="200" height="95" rx="14" stroke="var(--standup)"/>
+      <text class="node-title" x="560" y="160">standup</text>
+      <text class="node-sub"   x="560" y="188">altura z: 0.30 → 0.80</text>
+
+      <rect class="node-box" x="850" y="120" width="200" height="95" rx="14" stroke="var(--upright)"/>
+      <text class="node-title" x="950" y="160">upright</text>
+      <text class="node-sub"   x="950" y="188">altura z: 0.80 → 1.30</text>
+    </g>
+
+    <!-- Señales auxiliares (raíces) -->
+    <g>
+      <rect class="node-box" x="260" y="360" width="200" height="95" rx="14" stroke="var(--leg)"/>
+      <text class="node-title" x="360" y="400">leg_extension</text>
+      <text class="node-sub"   x="360" y="428">rodillas</text>
+
+      <rect class="node-box" x="660" y="360" width="200" height="95" rx="14" stroke="var(--torso)"/>
+      <text class="node-title" x="760" y="400">torso_straighten</text>
+      <text class="node-sub"   x="760" y="428">abdomen</text>
+    </g>
+  </svg>
+
+  <div class="formula">
+    El bono de cada nodo solo se activa cuando su padre supera el <em>passing score</em> (PS):
+    &nbsp; <code>A<sub>ij,t</sub> = max(A<sub>ij,t−1</sub>, R<sub>i,t</sub> − PS<sub>ij</sub>)</code>
+    &nbsp;·&nbsp; <code>R<sub>t</sub> = Σ<sub>i</sub> Σ<sub>j</sub> A<sub>ij,t</sub> · R<sub>j,t</sub></code>
+  </div>
+</body>
+</html>
