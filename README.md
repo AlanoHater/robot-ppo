@@ -46,22 +46,41 @@ Contribuciones del paper que sí se implementan:
    escalan por `min(1, 2*step/episode_max_steps)`, limitando movimientos
    bruscos al inicio de cada episodio.
 
+## Entregables del proyecto
+
+| Archivo | Qué es |
+|---------|--------|
+| [`reporte_proyecto.pdf`](reporte_proyecto.pdf) | **Reporte de 3 páginas (español)** — generado con `generate_report.py` |
+| [`SLIDES.md`](SLIDES.md) | **Guion de 3 diapositivas** para la presentación |
+| [`demo_v3_height.mp4`](demo_v3_height.mp4) | **Video** del robot incorporándose (v3, mejor modelo) |
+| [`demo_multipath_egocentric.mp4`](demo_multipath_egocentric.mp4) | Video del robot antes del fix (v2, retorciéndose) |
+| `compare_v2_v3.png` / `pose_sequence_v3.png` | Figuras: antes/después y secuencia de incorporación |
+
+Para regenerar el reporte: `python generate_report.py`. Para grabar un video del
+modelo: `python dag_reward_humanoid.py --mode video --out demo.mp4`.
+
 ## Estructura del repositorio
 
 ```
-dag_reward_humanoid.py        Script principal (wrapper de reward, entrenamiento, demo, ablation)
-results.png                   Curvas de entrenamiento — versión final (calibración corregida)
-dag_humanoid_model.zip         Modelo PPO entrenado — versión final
-train_full.log                Log de stdout del entrenamiento final
+dag_reward_humanoid.py        Script principal (wrapper de reward, train, demo, ablation, video)
+generate_report.py            Genera el reporte PDF de 3 páginas
+SLIDES.md                     Guion de 3 diapositivas
+reporte_proyecto.pdf          Reporte final (3 páginas, español)
 
-results_v1_buggy.png          Curvas del primer entrenamiento (passing score mal calibrado)
-dag_humanoid_model_v1_buggy.zip  Modelo de esa primera corrida
-train_full_v1_buggy.log       Log de esa primera corrida
+dag_humanoid_model.zip        Modelo PPO principal = v3 (mejor resultado: se sienta)
+results.png                   Curvas del modelo principal (v3)
+demo_v3_height.mp4            Video del modelo v3
+
+# Evidencia de cada iteración de depuración (antes/después):
+dag_humanoid_model_v1_buggy.zip      / results_v1_buggy.png       (passing score inalcanzable)
+dag_humanoid_model_v2_heightblind.zip / results_v2_heightblind.png (reward de altura ciego)
+dag_humanoid_model_v3_seated.zip     / results_v3_height.png      (FIX: rampa de altura → se sienta)
+dag_humanoid_model_v4_feettuck.zip   / results_v4_feettuck.png    (feet_tuck: no escapa la pose en L)
 ```
 
-Los archivos `*_v1_buggy.*` se conservan deliberadamente como evidencia de la
-iteración de depuración descrita abajo (útil para el reporte: comparación
-antes/después de corregir la calibración del reward).
+Los modelos y curvas versionados (`*_v1_buggy`, `*_v2_heightblind`,
+`*_v3_seated`, `*_v4_feettuck`) se conservan deliberadamente como evidencia del
+proceso de depuración documentado abajo (comparación antes/después de cada fix).
 
 ## Instalación
 
