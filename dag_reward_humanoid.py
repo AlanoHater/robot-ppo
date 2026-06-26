@@ -66,10 +66,10 @@ class AchievementRewardWrapper(Wrapper):
 
     SKILL_NAMES = ['pelvis_lift', 'leg_extension', 'standup', 'torso_straighten', 'upright']
     DEFAULT_PS  = {
-        (0, 2): 0.3,   # pelvis_lift   -> standup
-        (1, 2): 0.5,   # leg_extension -> standup  (camino alternativo)
-        (2, 4): 4.0,   # standup       -> upright
-        (3, 4): 0.3,   # torso_straighten -> upright (camino alternativo)
+        (0, 2): 0.3,    # pelvis_lift   -> standup
+        (1, 2): 0.03,   # leg_extension -> standup  (camino alternativo; max posible = 1.5*0.03 = 0.045)
+        (2, 4): 4.0,    # standup       -> upright
+        (3, 4): 0.02,   # torso_straighten -> upright (camino alternativo; max posible = 1.0*0.03 = 0.03)
     }
 
     def __init__(self, env, passing_scores=None, use_cpg=True,
@@ -109,8 +109,6 @@ class AchievementRewardWrapper(Wrapper):
             low  = np.concatenate([env.observation_space.low,  np.full(n_cpg, -1.0, dtype=np.float32)])
             high = np.concatenate([env.observation_space.high, np.full(n_cpg,  1.0, dtype=np.float32)])
             self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
-
-        self._reset_episode_state()
 
     @staticmethod
     def _rotate_by_inv_quat(v, quat):
@@ -177,15 +175,25 @@ class AchievementRewardWrapper(Wrapper):
         data = self.env.unwrapped.data
         z    = float(data.qpos[2])
 
-        # qpos[13]=right_knee, qpos[17]=left_knee (range real ~[-2.79, -0.035] rad)
-        knee_ext  = (float(data.qpos[13]) + float(data.qpos[17])) / 2.0 + 2.79
-        # qpos[8]=abdomen_y (flexión/extensión de columna, range ~[-1.31, 0.52] rad)
-        abdomen_y = float(data.qpos[8])
+        # qpos[13]=right_knee, qpos[17]=left_knee, qpos[8]=abdomen_y.
+        # Ambos empiezan ~0 al resetear (medido empíricamente). Probado y
+        # descartado: |desviación| de la línea base (ruido simétrico da
+        # ~3000 de reward sin progreso real) y ángulo con signo sin escala
+        # chica (ruido sin entrenar seguía dando ~1770, porque un solo
+        # ángulo de articulación se puede mover con torque aislado, sin
+        # necesidad de coordinar el cuerpo contra la gravedad como sí exige
+        # la altura). Bajo estrés con acciones aleatorias de rango completo,
+        # r_pelvis_lift da 0 en el 100% de los casos (la altura SÍ requiere
+        # esfuerzo coordinado) — por eso estas dos señales se escalan muy
+        # por debajo de r_pelvis_lift: son un empujón de exploración, no una
+        # fuente de recompensa que pueda competir con la señal de altura.
+        knee_now    = (float(data.qpos[13]) + float(data.qpos[17])) / 2.0
+        abdomen_now = float(data.qpos[8])
 
         r_pelvis_lift     = np.clip(z - 0.30, 0.0, None) * 3.0
-        r_leg_extension   = np.clip(knee_ext, 0.0, None) * 1.0
+        r_leg_extension   = np.clip(-knee_now - 0.05, 0.0, 1.5) * 0.03
         r_standup         = np.clip(z - 0.80, 0.0, None) * 8.0
-        r_torso_straight  = np.clip(1.31 - abs(abdomen_y), 0.0, None) * 1.5
+        r_torso_straight  = np.clip(-abdomen_now - 0.05, 0.0, 1.0) * 0.03
         r_upright         = np.clip(z - 1.00, 0.0, None) * 8.0
 
         return [r_pelvis_lift, r_leg_extension, r_standup, r_torso_straight, r_upright]
@@ -198,8 +206,8 @@ class AchievementRewardWrapper(Wrapper):
         return total
 
     def reset(self, **kwargs):
-        self._reset_episode_state()
         obs, info = self.env.reset(**kwargs)
+        self._reset_episode_state()
         return self._process_obs(obs), info
 
     def step(self, action):
