@@ -147,6 +147,85 @@ diff exacto y la justificación completa):
 *(Completar tras la corrida: resumen de si el robot logra `standup` con la
 calibración corregida, comparando `results.png` vs `results_v1_buggy.png`.)*
 
+### Rama experimental `feature/multipath-dag-egocentric` — DAG con bifurcaciones + ego-centric
+
+Hipótesis a probar: si el cuello de botella era la topología lineal del DAG
+(una sola "puerta" `lift→standup→upright`) y la falta de representación
+ego-centric, un grafo con **bifurcaciones reales** (dos caminos alternativos
+hacia `standup` y hacia `upright`) más velocidades rotadas al frame de la
+raíz deberían ayudar al agente a encontrar más rutas hacia ponerse de pie.
+
+Cambios respecto a `main`:
+- DAG de 5 nodos con caminos alternativos: `pelvis_lift` y `leg_extension` →
+  `standup`; `standup` y `torso_straighten` → `upright` (ver diagrama en el
+  docstring de `AchievementRewardWrapper`).
+- Representación ego-centric: velocidades lineales/angulares de la raíz y de
+  los 14 cuerpos rotadas al frame del torso (verificado contra
+  `mujoco.mj_objectVelocity` — ver historial de commits para el detalle).
+- Antes de lanzar la corrida completa se encontraron y corrigieron dos bugs
+  de diseño de reward por stress-testing con acciones aleatorias de rango
+  completo (ver commit `c2b79f4`): las señales `leg_extension` y
+  `torso_straighten` daban recompensa casi máxima desde el frame 1 sin que el
+  agente hiciera nada, porque asumían una pose inicial (rodillas flexionadas)
+  que no es la real en `HumanoidStandup-v4` (rodillas/abdomen arrancan en
+  ≈0). Se corrigió midiendo el ángulo real al resetear, usando signo correcto
+  y reduciendo la escala ~50-100x para que fueran empujones de exploración
+  menores, no una fuente de reward competitiva con la altura.
+
+**Resultado de la corrida completa (3,000,000 steps, 10 entornos en
+paralelo, ~41 min):**
+
+- `ep_rew_mean` subió de 32.9 a 67.3 y se estancó ahí — a diferencia de
+  `main` (iteración 3), aquí la curva sí sube de forma sostenida en vez de
+  quedar plana desde el principio.
+- Pero la razón de esa subida **no es que el robot se pare más**: `standup`
+  y `upright` (los nodos que dependían del DAG con bifurcaciones) se
+  mantienen en 0.0 durante las ~3000 episodios completos, igual que en
+  `main`. La altura (`pelvis_lift`, escala ×3, la señal "real" de progreso)
+  nunca supera ~0.05 de recompensa (z apenas pasa de 0.30 + 0.017 ≈ 0.317) —
+  el robot prácticamente no se levanta del piso en ningún momento.
+- Lo que sí sube es la suma de `leg_extension` (satura en su tope de 0.045
+  casi de inmediato) + `torso_straighten` (satura en su tope de 0.03) — dos
+  señales de ángulo de articulación aisladas, deliberadamente pequeñas y
+  acotadas. El agente aprende a mantener esos dos ángulos en su rango
+  recompensado y nada más; el ~67 de reward total es básicamente
+  `0.045 + 0.03 ≈ 0.075` por step × 1000 steps, no progreso real hacia pararse.
+- **La hipótesis no se confirma**: agregar bifurcaciones al DAG y
+  representación ego-centric no resolvió el estancamiento de `standup`/
+  `upright`. El cuello de botella real parece estar en que la política nunca
+  encuentra una secuencia de acciones que levante el centro de masa de forma
+  sostenida — ni con la señal de altura aislada (`pelvis_lift`) ni con los
+  caminos alternativos. Es decir, el problema no era la forma del grafo, era
+  que ninguna señal en este presupuesto de muestras logra que 17 DoF
+  coordinen un movimiento de incorporarse desde el suelo.
+- Señal de alerta adicional: `std` (desviación de la distribución de
+  acciones de PPO) creció sin freno durante todo el entrenamiento (1.0 →
+  4.4), y `approx_kl`/`clip_fraction` se mantuvieron anormalmente altos
+  (0.25-0.5 / ~0.65-0.77, muy por encima del rango sano <0.02 / <0.3). Esto
+  sugiere que la política se volvió progresivamente **más errática**, no más
+  estable — consistente con `ent_coef=0.005` (bono de entropía) empujando
+  hacia mayor varianza de acción mientras el reward dominante (las dos
+  señales de ángulo acotadas) no penaliza esa varianza, porque se puede
+  farmear con ruido de torque sin necesidad de coordinación.
+- Se encontró además un bug de logging (no de entrenamiento) en
+  `DAGRewardCallback`: el acumulador de reward total por episodio era un
+  único escalar compartido entre los 10 entornos paralelos en vez de uno por
+  entorno, lo que inflaba ~10x el panel "(b) Reward Total por Episodio" de
+  `results.png` en 1 de cada 10 episodios (con un patrón de diente de
+  sierra). No afectaba el entrenamiento real ni el `ep_rew_mean` que reporta
+  SB3 (ese viene de `Monitor`, una fuente independiente) — solo ese gráfico.
+  Corregido en el código (acumuladores por entorno) para corridas futuras.
+
+Conclusión honesta: con este presupuesto de muestras (3M steps, MuJoCo CPU),
+ni la topología DAG lineal (`main`) ni la de bifurcaciones + ego-centric
+(esta rama) logran que el agente se ponga de pie. El reward shaping evita el
+problema de "nunca hay señal" (el agente sí aprende *algo*, las curvas
+suben), pero ese "algo" termina siendo explotar las señales más fáciles de
+conseguir en vez de progresar hacia el objetivo real — un recordatorio de
+que el paper original logra resultados con miles de entornos paralelos en
+Isaac Gym y decenas de millones de steps, dos a tres órdenes de magnitud más
+que lo disponible aquí.
+
 ## Limitaciones conocidas
 
 - **Presupuesto de muestras bajo**: 1M steps en un solo entorno CPU es órdenes

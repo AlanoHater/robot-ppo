@@ -238,14 +238,24 @@ class AchievementRewardWrapper(Wrapper):
 # ================================================================
 
 class DAGRewardCallback(BaseCallback):
-    def __init__(self, n_skills=None, verbose=0):
+    # _ep_skill_max/_ep_total deben ser UNA entrada por entorno paralelo: con
+    # n_envs>1 (SubprocVecEnv) los 10 entornos truncan a la vez cada 1000
+    # steps, así que un único acumulador compartido se llena con los pasos de
+    # los 10 entornos antes del primer reset del lote y solo el primer env (i=0)
+    # del lote se queda con esa suma ~10x inflada; los otros 9 quedan con la
+    # recompensa de un solo paso. Verificado: explica el patrón de "diente de
+    # sierra" (picos ~10x ep_rew_mean intercalados con valores casi 0) que
+    # aparecía en el panel (b) de results.png. No afectaba a ep_rew_mean de SB3
+    # (logueado correctamente por Monitor, fuente independiente) ni al modelo
+    # entrenado — solo a este gráfico de diagnóstico.
+    def __init__(self, n_skills=None, verbose=0, n_envs=1):
         super().__init__(verbose)
         self.skill_names    = AchievementRewardWrapper.SKILL_NAMES
         self.n_skills       = n_skills or len(self.skill_names)
         self.ep_max_skill   = []
         self.ep_total       = []
-        self._ep_skill_max  = [0.0] * self.n_skills
-        self._ep_total      = 0.0
+        self._ep_skill_max  = [[0.0] * self.n_skills for _ in range(n_envs)]
+        self._ep_total      = [0.0] * n_envs
 
     def _on_step(self) -> bool:
         infos   = self.locals.get('infos', [{}])
@@ -255,13 +265,13 @@ class DAGRewardCallback(BaseCallback):
         for i, info in enumerate(infos):
             sr = info.get('stage_rewards', [0.0] * self.n_skills)
             for k in range(self.n_skills):
-                self._ep_skill_max[k] = max(self._ep_skill_max[k], sr[k])
-            self._ep_total += rewards[i] if i < len(rewards) else 0.0
+                self._ep_skill_max[i][k] = max(self._ep_skill_max[i][k], sr[k])
+            self._ep_total[i] += rewards[i] if i < len(rewards) else 0.0
             if dones[i]:
-                self.ep_max_skill.append(list(self._ep_skill_max))
-                self.ep_total.append(self._ep_total)
-                self._ep_skill_max = [0.0] * self.n_skills
-                self._ep_total     = 0.0
+                self.ep_max_skill.append(list(self._ep_skill_max[i]))
+                self.ep_total.append(self._ep_total[i])
+                self._ep_skill_max[i] = [0.0] * self.n_skills
+                self._ep_total[i]     = 0.0
         return True
 
 
@@ -366,7 +376,7 @@ def train(total_timesteps=500_000, save_path='dag_humanoid_model', n_envs=1):
         verbose       = 1,
     )
 
-    callback = DAGRewardCallback()
+    callback = DAGRewardCallback(n_envs=n_envs)
     model.learn(total_timesteps=total_timesteps, callback=callback, progress_bar=True)
     model.save(save_path)
     print(f"\n[OK] Modelo guardado: {save_path}.zip")
